@@ -1,273 +1,117 @@
-# System libs
-import os
-import time
-# import math
+# python3.7
+"""Main function for model training."""
+
+import os.path
+import shutil
+import warnings
 import random
 import argparse
-from distutils.version import LooseVersion
-# Numerical libs
+import numpy as np
+
 import torch
-import torch.nn as nn
-# Our libs
-from mit_semseg.config import cfg
-from mit_semseg.dataset import TrainDataset
-from mit_semseg.models import ModelBuilder, SegmentationModule
-from mit_semseg.utils import AverageMeter, parse_devices, setup_logger
-from mit_semseg.lib.nn import UserScatteredDataParallel, user_scattered_collate, patch_replication_callback
+import torch.distributed as dist
+
+import runners
+from utils.logger import build_logger
+from utils.misc import init_dist
+from utils.misc import DictAction, parse_config, update_config
 
 
-# train one epoch
-def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    ave_total_loss = AverageMeter()
-    ave_acc = AverageMeter()
-
-    segmentation_module.train(not cfg.TRAIN.fix_bn)
-
-    # main loop
-    tic = time.time()
-    for i in range(cfg.TRAIN.epoch_iters):
-        # load a batch of data
-        batch_data = next(iterator)
-        data_time.update(time.time() - tic)
-        segmentation_module.zero_grad()
-
-        # adjust learning rate
-        cur_iter = i + (epoch - 1) * cfg.TRAIN.epoch_iters
-        adjust_learning_rate(optimizers, cur_iter, cfg)
-
-        # forward pass
-        loss, acc = segmentation_module(batch_data)
-        loss = loss.mean()
-        acc = acc.mean()
-
-        # Backward
-        loss.backward()
-        for optimizer in optimizers:
-            optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - tic)
-        tic = time.time()
-
-        # update average loss and acc
-        ave_total_loss.update(loss.data.item())
-        ave_acc.update(acc.data.item()*100)
-
-        # calculate accuracy, and display
-        if i % cfg.TRAIN.disp_iter == 0:
-            print('Epoch: [{}][{}/{}], Time: {:.2f}, Data: {:.2f}, '
-                  'lr_encoder: {:.6f}, lr_decoder: {:.6f}, '
-                  'Accuracy: {:4.2f}, Loss: {:.6f}'
-                  .format(epoch, i, cfg.TRAIN.epoch_iters,
-                          batch_time.average(), data_time.average(),
-                          cfg.TRAIN.running_lr_encoder, cfg.TRAIN.running_lr_decoder,
-                          ave_acc.average(), ave_total_loss.average()))
-
-            fractional_epoch = epoch - 1 + 1. * i / cfg.TRAIN.epoch_iters
-            history['train']['epoch'].append(fractional_epoch)
-            history['train']['loss'].append(loss.data.item())
-            history['train']['acc'].append(acc.data.item())
+def parse_args():
+    """Parses arguments."""
+    parser = argparse.ArgumentParser(description='Run model training.')
+    parser.add_argument('config', type=str,
+                        help='Path to the training configuration.')
+    parser.add_argument('--work_dir', type=str, required=True,
+                        help='The work directory to save logs and checkpoints.')
+    parser.add_argument('--resume_path', type=str, default=None,
+                        help='Path to the checkpoint to resume training.')
+    parser.add_argument('--weight_path', type=str, default=None,
+                        help='Path to the checkpoint to load model weights, '
+                             'but not resume other states.')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed. (default: %(default)s)')
+    parser.add_argument('--launcher', type=str, default='pytorch',
+                        choices=['pytorch', 'slurm'],
+                        help='Launcher type. (default: %(default)s)')
+    parser.add_argument('--backend', type=str, default='nccl',
+                        help='Backend for distributed launcher. (default: '
+                             '%(default)s)')
+    parser.add_argument('--rank', type=int, default=-1,
+                        help='Node rank for distributed running. (default: '
+                             '%(default)s)')
+    parser.add_argument('--local_rank', type=int, default=0,
+                        help='Rank of the current node. (default: %(default)s)')
+    parser.add_argument('--options', nargs='+', action=DictAction,
+                        help='arguments in dict')
+    return parser.parse_args()
 
 
-def checkpoint(nets, history, cfg, epoch):
-    print('Saving checkpoints...')
-    (net_encoder, net_decoder, crit) = nets
+def main():
+    """Main function."""
+    # Parse arguments.
+    args = parse_args()
 
-    dict_encoder = net_encoder.state_dict()
-    dict_decoder = net_decoder.state_dict()
+    # Parse configurations.
+    config = parse_config(args.config)
+    config = update_config(config, args.options)
+    config.work_dir = args.work_dir
+    config.resume_path = args.resume_path
+    config.weight_path = args.weight_path
+    config.seed = args.seed
+    config.launcher = args.launcher
+    config.backend = args.backend
 
-    torch.save(
-        history,
-        '{}/history_epoch_{}.pth'.format(cfg.DIR, epoch))
-    torch.save(
-        dict_encoder,
-        '{}/encoder_epoch_{}.pth'.format(cfg.DIR, epoch))
-    torch.save(
-        dict_decoder,
-        '{}/decoder_epoch_{}.pth'.format(cfg.DIR, epoch))
+    # Set CUDNN.
+    config.cudnn_benchmark = config.get('cudnn_benchmark', True)
+    config.cudnn_deterministic = config.get('cudnn_deterministic', False)
+    torch.backends.cudnn.benchmark = config.cudnn_benchmark
+    torch.backends.cudnn.deterministic = config.cudnn_deterministic
 
+    # Set random seed.
+    if config.seed is not None:
+        random.seed(config.seed)
+        np.random.seed(config.seed)
+        torch.manual_seed(config.seed)
+        config.cudnn_deterministic = True
+        torch.backends.cudnn.deterministic = True
+        warnings.warn('Random seed is set for training! '
+                      'This will turn on the CUDNN deterministic setting, '
+                      'which may slow down the training considerably! '
+                      'Unexpected behavior can be observed when resuming from '
+                      'checkpoints.')
 
-def group_weight(module):
-    group_decay = []
-    group_no_decay = []
-    for m in module.modules():
-        if isinstance(m, nn.Linear):
-            group_decay.append(m.weight)
-            if m.bias is not None:
-                group_no_decay.append(m.bias)
-        elif isinstance(m, nn.modules.conv._ConvNd):
-            group_decay.append(m.weight)
-            if m.bias is not None:
-                group_no_decay.append(m.bias)
-        elif isinstance(m, nn.modules.batchnorm._BatchNorm):
-            if m.weight is not None:
-                group_no_decay.append(m.weight)
-            if m.bias is not None:
-                group_no_decay.append(m.bias)
+    # Set launcher.
+    config.is_distributed = True
+    init_dist(config.launcher, backend=config.backend)
+    config.num_gpus = dist.get_world_size()
 
-    assert len(list(module.parameters())) == len(group_decay) + len(group_no_decay)
-    groups = [dict(params=group_decay), dict(params=group_no_decay, weight_decay=.0)]
-    return groups
-
-
-def create_optimizers(nets, cfg):
-    (net_encoder, net_decoder, crit) = nets
-    optimizer_encoder = torch.optim.SGD(
-        group_weight(net_encoder),
-        lr=cfg.TRAIN.lr_encoder,
-        momentum=cfg.TRAIN.beta1,
-        weight_decay=cfg.TRAIN.weight_decay)
-    optimizer_decoder = torch.optim.SGD(
-        group_weight(net_decoder),
-        lr=cfg.TRAIN.lr_decoder,
-        momentum=cfg.TRAIN.beta1,
-        weight_decay=cfg.TRAIN.weight_decay)
-    return (optimizer_encoder, optimizer_decoder)
-
-
-def adjust_learning_rate(optimizers, cur_iter, cfg):
-    scale_running_lr = ((1. - float(cur_iter) / cfg.TRAIN.max_iters) ** cfg.TRAIN.lr_pow)
-    cfg.TRAIN.running_lr_encoder = cfg.TRAIN.lr_encoder * scale_running_lr
-    cfg.TRAIN.running_lr_decoder = cfg.TRAIN.lr_decoder * scale_running_lr
-
-    (optimizer_encoder, optimizer_decoder) = optimizers
-    for param_group in optimizer_encoder.param_groups:
-        param_group['lr'] = cfg.TRAIN.running_lr_encoder
-    for param_group in optimizer_decoder.param_groups:
-        param_group['lr'] = cfg.TRAIN.running_lr_decoder
-
-
-def main(cfg, gpus):
-    # Network Builders
-    net_encoder = ModelBuilder.build_encoder(
-        arch=cfg.MODEL.arch_encoder.lower(),
-        fc_dim=cfg.MODEL.fc_dim,
-        weights=cfg.MODEL.weights_encoder)
-    net_decoder = ModelBuilder.build_decoder(
-        arch=cfg.MODEL.arch_decoder.lower(),
-        fc_dim=cfg.MODEL.fc_dim,
-        num_class=cfg.DATASET.num_class,
-        weights=cfg.MODEL.weights_decoder)
-
-    crit = nn.NLLLoss(ignore_index=-1)
-
-    if cfg.MODEL.arch_decoder.endswith('deepsup'):
-        segmentation_module = SegmentationModule(
-            net_encoder, net_decoder, crit, cfg.TRAIN.deep_sup_scale)
+    # Setup logger.
+    if dist.get_rank() == 0:
+        logger_type = config.get('logger_type', 'normal')
+        logger = build_logger(logger_type, work_dir=config.work_dir)
+        shutil.copy(args.config, os.path.join(config.work_dir, 'config.py'))
+        commit_id = os.popen('git rev-parse HEAD').readline()
+        logger.info(f'Commit ID: {commit_id}')
     else:
-        segmentation_module = SegmentationModule(
-            net_encoder, net_decoder, crit)
+        logger = build_logger('dumb', work_dir=config.work_dir)
 
-    # Dataset and Loader
-    dataset_train = TrainDataset(
-        cfg.DATASET.root_dataset,
-        cfg.DATASET.list_train,
-        cfg.DATASET,
-        batch_per_gpu=cfg.TRAIN.batch_size_per_gpu)
-
-    loader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        batch_size=len(gpus),  # we have modified data_parallel
-        shuffle=False,  # we do not use this param
-        collate_fn=user_scattered_collate,
-        num_workers=cfg.TRAIN.workers,
-        drop_last=True,
-        pin_memory=True)
-    print('1 Epoch = {} iters'.format(cfg.TRAIN.epoch_iters))
-
-    # create loader iterator
-    iterator_train = iter(loader_train)
-
-    # load nets into gpu
-    if len(gpus) > 1:
-        segmentation_module = UserScatteredDataParallel(
-            segmentation_module,
-            device_ids=gpus)
-        # For sync bn
-        patch_replication_callback(segmentation_module)
-    segmentation_module.cuda()
-
-    # Set up optimizers
-    nets = (net_encoder, net_decoder, crit)
-    optimizers = create_optimizers(nets, cfg)
-
-    # Main loop
-    history = {'train': {'epoch': [], 'loss': [], 'acc': []}}
-
-    for epoch in range(cfg.TRAIN.start_epoch, cfg.TRAIN.num_epoch):
-        train(segmentation_module, iterator_train, optimizers, history, epoch+1, cfg)
-
-        # checkpointing
-        checkpoint(nets, history, cfg, epoch+1)
-
-    print('Training Done!')
+    # Start training.
+    runner = getattr(runners, config.runner_type)(config, logger)
+    if config.resume_path:
+        runner.load(filepath=config.resume_path,
+                    running_metadata=True,
+                    learning_rate=True,
+                    optimizer=True,
+                    running_stats=False)
+    if config.weight_path:
+        runner.load(filepath=config.weight_path,
+                    running_metadata=False,
+                    learning_rate=False,
+                    optimizer=False,
+                    running_stats=False)
+    runner.train()
 
 
 if __name__ == '__main__':
-    assert LooseVersion(torch.__version__) >= LooseVersion('0.4.0'), \
-        'PyTorch>=0.4.0 is required'
-
-    parser = argparse.ArgumentParser(
-        description="PyTorch Semantic Segmentation Training"
-    )
-    parser.add_argument(
-        "--cfg",
-        default="config/ade20k-resnet50dilated-ppm_deepsup.yaml",
-        metavar="FILE",
-        help="path to config file",
-        type=str,
-    )
-    parser.add_argument(
-        "--gpus",
-        default="0-3",
-        help="gpus to use, e.g. 0-3 or 0,1,2,3"
-    )
-    parser.add_argument(
-        "opts",
-        help="Modify config options using the command-line",
-        default=None,
-        nargs=argparse.REMAINDER,
-    )
-    args = parser.parse_args()
-
-    cfg.merge_from_file(args.cfg)
-    cfg.merge_from_list(args.opts)
-    # cfg.freeze()
-
-    logger = setup_logger(distributed_rank=0)   # TODO
-    logger.info("Loaded configuration file {}".format(args.cfg))
-    logger.info("Running with config:\n{}".format(cfg))
-
-    # Output directory
-    if not os.path.isdir(cfg.DIR):
-        os.makedirs(cfg.DIR)
-    logger.info("Outputing checkpoints to: {}".format(cfg.DIR))
-    with open(os.path.join(cfg.DIR, 'config.yaml'), 'w') as f:
-        f.write("{}".format(cfg))
-
-    # Start from checkpoint
-    if cfg.TRAIN.start_epoch > 0:
-        cfg.MODEL.weights_encoder = os.path.join(
-            cfg.DIR, 'encoder_epoch_{}.pth'.format(cfg.TRAIN.start_epoch))
-        cfg.MODEL.weights_decoder = os.path.join(
-            cfg.DIR, 'decoder_epoch_{}.pth'.format(cfg.TRAIN.start_epoch))
-        assert os.path.exists(cfg.MODEL.weights_encoder) and \
-            os.path.exists(cfg.MODEL.weights_decoder), "checkpoint does not exitst!"
-
-    # Parse gpu ids
-    gpus = parse_devices(args.gpus)
-    gpus = [x.replace('gpu', '') for x in gpus]
-    gpus = [int(x) for x in gpus]
-    num_gpus = len(gpus)
-    cfg.TRAIN.batch_size = num_gpus * cfg.TRAIN.batch_size_per_gpu
-
-    cfg.TRAIN.max_iters = cfg.TRAIN.epoch_iters * cfg.TRAIN.num_epoch
-    cfg.TRAIN.running_lr_encoder = cfg.TRAIN.lr_encoder
-    cfg.TRAIN.running_lr_decoder = cfg.TRAIN.lr_decoder
-
-    random.seed(cfg.TRAIN.seed)
-    torch.manual_seed(cfg.TRAIN.seed)
-
-    main(cfg, gpus)
+    main()

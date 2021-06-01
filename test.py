@@ -1,198 +1,114 @@
-# System libs
-import os
+# python3.7
+"""Main function for model inference."""
+
+import os.path
+import shutil
 import argparse
-from distutils.version import LooseVersion
-# Numerical libs
-import numpy as np
+
 import torch
-import torch.nn as nn
-from scipy.io import loadmat
-import csv
-# Our libs
-from mit_semseg.dataset import TestDataset
-from mit_semseg.models import ModelBuilder, SegmentationModule
-from mit_semseg.utils import colorEncode, find_recursive, setup_logger
-from mit_semseg.lib.nn import user_scattered_collate, async_copy_to
-from mit_semseg.lib.utils import as_numpy
-from PIL import Image
-from tqdm import tqdm
-from mit_semseg.config import cfg
+import torch.distributed as dist
 
-colors = loadmat('data/color150.mat')['colors']
-names = {}
-with open('data/object150_info.csv') as f:
-    reader = csv.reader(f)
-    next(reader)
-    for row in reader:
-        names[int(row[0])] = row[5].split(";")[0]
+import runners
+from utils.logger import build_logger
+from utils.misc import init_dist
+from utils.misc import DictAction, parse_config, update_config
 
 
-def visualize_result(data, pred, cfg):
-    (img, info) = data
-
-    # print predictions in descending order
-    pred = np.int32(pred)
-    pixs = pred.size
-    uniques, counts = np.unique(pred, return_counts=True)
-    print("Predictions in [{}]:".format(info))
-    for idx in np.argsort(counts)[::-1]:
-        name = names[uniques[idx] + 1]
-        ratio = counts[idx] / pixs * 100
-        if ratio > 0.1:
-            print("  {}: {:.2f}%".format(name, ratio))
-
-    # colorize prediction
-    pred_color = colorEncode(pred, colors).astype(np.uint8)
-
-    # aggregate images and save
-    im_vis = np.concatenate((img, pred_color), axis=1)
-
-    img_name = info.split('/')[-1]
-    Image.fromarray(im_vis).save(
-        os.path.join(cfg.TEST.result, img_name.replace('.jpg', '.png')))
-
-
-def test(segmentation_module, loader, gpu):
-    segmentation_module.eval()
-
-    pbar = tqdm(total=len(loader))
-    for batch_data in loader:
-        # process data
-        batch_data = batch_data[0]
-        segSize = (batch_data['img_ori'].shape[0],
-                   batch_data['img_ori'].shape[1])
-        img_resized_list = batch_data['img_data']
-
-        with torch.no_grad():
-            scores = torch.zeros(1, cfg.DATASET.num_class, segSize[0], segSize[1])
-            scores = async_copy_to(scores, gpu)
-
-            for img in img_resized_list:
-                feed_dict = batch_data.copy()
-                feed_dict['img_data'] = img
-                del feed_dict['img_ori']
-                del feed_dict['info']
-                feed_dict = async_copy_to(feed_dict, gpu)
-
-                # forward pass
-                pred_tmp = segmentation_module(feed_dict, segSize=segSize)
-                scores = scores + pred_tmp / len(cfg.DATASET.imgSizes)
-
-            _, pred = torch.max(scores, dim=1)
-            pred = as_numpy(pred.squeeze(0).cpu())
-
-        # visualization
-        visualize_result(
-            (batch_data['img_ori'], batch_data['info']),
-            pred,
-            cfg
-        )
-
-        pbar.update(1)
+def parse_args():
+    """Parses arguments."""
+    parser = argparse.ArgumentParser(description='Run model inference.')
+    parser.add_argument('config', type=str,
+                        help='Path to the inference configuration.')
+    parser.add_argument('--work_dir', type=str, required=True,
+                        help='The work directory to save logs and checkpoints.')
+    parser.add_argument('--checkpoint', type=str, required=True,
+                        help='Path to the checkpoint to load. (default: '
+                             '%(default)s)')
+    parser.add_argument('--synthesis_num', type=int, default=1000,
+                        help='Number of samples to synthesize. Set as 0 to '
+                             'disable synthesis. (default: %(default)s)')
+    parser.add_argument('--fid_num', type=int, default=50000,
+                        help='Number of samples to compute FID. Set as 0 to '
+                             'disable FID test. (default: %(default)s)')
+    parser.add_argument('--use_torchvision', action='store_true',
+                        help='Wether to use the Inception model from '
+                             '`torchvision` to compute FID. (default: False)')
+    parser.add_argument('--launcher', type=str, default='pytorch',
+                        choices=['pytorch', 'slurm'],
+                        help='Launcher type. (default: %(default)s)')
+    parser.add_argument('--backend', type=str, default='nccl',
+                        help='Backend for distributed launcher. (default: '
+                             '%(default)s)')
+    parser.add_argument('--rank', type=int, default=-1,
+                        help='Node rank for distributed running. (default: '
+                             '%(default)s)')
+    parser.add_argument('--local_rank', type=int, default=0,
+                        help='Rank of the current node. (default: %(default)s)')
+    parser.add_argument('--options', nargs='+', action=DictAction,
+                        help='arguments in dict')
+    return parser.parse_args()
 
 
-def main(cfg, gpu):
-    torch.cuda.set_device(gpu)
+def main():
+    """Main function."""
+    # Parse arguments.
+    args = parse_args()
 
-    # Network Builders
-    net_encoder = ModelBuilder.build_encoder(
-        arch=cfg.MODEL.arch_encoder,
-        fc_dim=cfg.MODEL.fc_dim,
-        weights=cfg.MODEL.weights_encoder)
-    net_decoder = ModelBuilder.build_decoder(
-        arch=cfg.MODEL.arch_decoder,
-        fc_dim=cfg.MODEL.fc_dim,
-        num_class=cfg.DATASET.num_class,
-        weights=cfg.MODEL.weights_decoder,
-        use_softmax=True)
+    # Parse configurations.
+    config = parse_config(args.config)
+    config = update_config(config, args.options)
+    config.work_dir = args.work_dir
+    config.checkpoint = args.checkpoint
+    config.launcher = args.launcher
+    config.backend = args.backend
+    if not os.path.isfile(config.checkpoint):
+        raise FileNotFoundError(f'Checkpoint file `{config.checkpoint}` is '
+                                f'missing!')
 
-    crit = nn.NLLLoss(ignore_index=-1)
+    # Set CUDNN.
+    config.cudnn_benchmark = config.get('cudnn_benchmark', True)
+    config.cudnn_deterministic = config.get('cudnn_deterministic', False)
+    torch.backends.cudnn.benchmark = config.cudnn_benchmark
+    torch.backends.cudnn.deterministic = config.cudnn_deterministic
 
-    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit)
+    # Setting for launcher.
+    config.is_distributed = True
+    init_dist(config.launcher, backend=config.backend)
+    config.num_gpus = dist.get_world_size()
 
-    # Dataset and Loader
-    dataset_test = TestDataset(
-        cfg.list_test,
-        cfg.DATASET)
-    loader_test = torch.utils.data.DataLoader(
-        dataset_test,
-        batch_size=cfg.TEST.batch_size,
-        shuffle=False,
-        collate_fn=user_scattered_collate,
-        num_workers=5,
-        drop_last=True)
+    # Setup logger.
+    if dist.get_rank() == 0:
+        logger_type = config.get('logger_type', 'normal')
+        logger = build_logger(logger_type, work_dir=config.work_dir)
+        shutil.copy(args.config, os.path.join(config.work_dir, 'config.py'))
+        commit_id = os.popen('git rev-parse HEAD').readline()
+        logger.info(f'Commit ID: {commit_id}')
+    else:
+        logger = build_logger('dumb', work_dir=config.work_dir)
 
-    segmentation_module.cuda()
+    # Start inference.
+    runner = getattr(runners, config.runner_type)(config, logger)
+    runner.load(filepath=config.checkpoint,
+                running_metadata=False,
+                learning_rate=False,
+                optimizer=False,
+                running_stats=False)
 
-    # Main loop
-    test(segmentation_module, loader_test, gpu)
+    if args.synthesis_num > 0:
+        num = args.synthesis_num
+        logger.print()
+        logger.info(f'Synthesizing images ...')
+        runner.synthesize(num, html_name=f'synthesis_{num}.html')
+        logger.info(f'Finish synthesizing {num} images.')
 
-    print('Inference done!')
+    if args.fid_num > 0:
+        num = args.fid_num
+        logger.print()
+        logger.info(f'Testing FID ...')
+        fid_value = runner.fid(num, align_tf=not args.use_torchvision)
+        logger.info(f'Finish testing FID on {num} samples. '
+                    f'The result is {fid_value:.6f}.')
 
 
 if __name__ == '__main__':
-    assert LooseVersion(torch.__version__) >= LooseVersion('0.4.0'), \
-        'PyTorch>=0.4.0 is required'
-
-    parser = argparse.ArgumentParser(
-        description="PyTorch Semantic Segmentation Testing"
-    )
-    parser.add_argument(
-        "--imgs",
-        required=True,
-        type=str,
-        help="an image path, or a directory name"
-    )
-    parser.add_argument(
-        "--cfg",
-        default="config/ade20k-resnet50dilated-ppm_deepsup.yaml",
-        metavar="FILE",
-        help="path to config file",
-        type=str,
-    )
-    parser.add_argument(
-        "--gpu",
-        default=0,
-        type=int,
-        help="gpu id for evaluation"
-    )
-    parser.add_argument(
-        "opts",
-        help="Modify config options using the command-line",
-        default=None,
-        nargs=argparse.REMAINDER,
-    )
-    args = parser.parse_args()
-
-    cfg.merge_from_file(args.cfg)
-    cfg.merge_from_list(args.opts)
-    # cfg.freeze()
-
-    logger = setup_logger(distributed_rank=0)   # TODO
-    logger.info("Loaded configuration file {}".format(args.cfg))
-    logger.info("Running with config:\n{}".format(cfg))
-
-    cfg.MODEL.arch_encoder = cfg.MODEL.arch_encoder.lower()
-    cfg.MODEL.arch_decoder = cfg.MODEL.arch_decoder.lower()
-
-    # absolute paths of model weights
-    cfg.MODEL.weights_encoder = os.path.join(
-        cfg.DIR, 'encoder_' + cfg.TEST.checkpoint)
-    cfg.MODEL.weights_decoder = os.path.join(
-        cfg.DIR, 'decoder_' + cfg.TEST.checkpoint)
-
-    assert os.path.exists(cfg.MODEL.weights_encoder) and \
-        os.path.exists(cfg.MODEL.weights_decoder), "checkpoint does not exitst!"
-
-    # generate testing image list
-    if os.path.isdir(args.imgs):
-        imgs = find_recursive(args.imgs)
-    else:
-        imgs = [args.imgs]
-    assert len(imgs), "imgs should be a path to image (.jpg) or directory."
-    cfg.list_test = [{'fpath_img': x} for x in imgs]
-
-    if not os.path.isdir(cfg.TEST.result):
-        os.makedirs(cfg.TEST.result)
-
-    main(cfg, args.gpu)
+    main()

@@ -19,14 +19,18 @@ class SegmentationModuleBase(nn.Module):
 
 
 class SegmentationModule(SegmentationModuleBase):
-    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None):
+    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None, fixed=False):
         super(SegmentationModule, self).__init__()
         self.encoder = net_enc
         self.decoder = net_dec
         self.crit = crit
         self.deep_sup_scale = deep_sup_scale
+        self.fixed = fixed
 
     def forward(self, feed_dict, *, segSize=None):
+        # modularized
+        if self.fixed:
+            return self.decoder(self.encoder(feed_dict, return_feature_maps=True), segSize=segSize)
         # training
         if segSize is None:
             if self.deep_sup_scale is not None: # use deep supervision technique

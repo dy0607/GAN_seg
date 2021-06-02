@@ -9,9 +9,9 @@ runner_type = 'StyleGANRunner'
 gan_type = 'stylegan'
 resolution = 256
 
-batch_size = 12
+batch_size = 8
 val_batch_size = 32
-total_img = 8000_000
+total_img = 4000_000
 
 # Training dataset is repeated at the beginning to avoid loading dataset
 # repeatedly at the end of each epoch. This can save some I/O time.
@@ -27,8 +27,8 @@ data = dict(
 controllers = dict(
     RunningLogger=dict(every_n_iters=10),
     ProgressScheduler=dict(
-        every_n_iters=1, init_res=8, minibatch_repeats=4,
-        lod_training_img=300_000, lod_transition_img=300_000,
+        every_n_iters=1, init_res=256, minibatch_repeats=4,
+        lod_training_img=200_000, lod_transition_img=200_000,
         batch_size_schedule=dict(res4=64, res8=32, res16=32, res32=32, res64=32, res128=16),
     ),
     Snapshoter=dict(every_n_iters=2500, first_iter=True, num=100),
@@ -52,11 +52,17 @@ modules = dict(
                           trunc_psi=1.0, trunc_layers=0, randomize_noise=True),
         kwargs_val=dict(trunc_psi=1.0, trunc_layers=0, randomize_noise=False),
         g_smooth_img=10000,
-    )
+    ),
+    segmentator=dict(
+        model=dict(
+            gan_type=gan_type, 
+            resolution=resolution, 
+            config_path='config_seg/ade20k-hrnetv2.yaml')
+    ),
 )
 
 loss = dict(
-    type='LogisticGANLoss',
+    type='SegGANLoss',
     d_loss_kwargs=dict(r1_gamma=10.0),
     g_loss_kwargs=dict(),
 )

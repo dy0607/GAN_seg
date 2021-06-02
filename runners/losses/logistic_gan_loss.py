@@ -5,7 +5,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-__all__ = ['LogisticGANLoss']
+__all__ = ['LogisticGANLoss', 'SegGANLoss']
 
 apply_loss_scaling = lambda x: x * torch.exp(x * np.log(2.0))
 undo_loss_scaling = lambda x: x * torch.exp(-x * np.log(2.0))
@@ -109,3 +109,69 @@ class LogisticGANLoss(object):
         runner.running_stats.update({'g_loss': g_loss.item()})
 
         return g_loss
+
+
+class SegGANLoss(LogisticGANLoss):
+
+    def __init__(self, runner, d_loss_kwargs=None, g_loss_kwargs=None):
+        super().__init__(runner, d_loss_kwargs=d_loss_kwargs, g_loss_kwargs=g_loss_kwargs)
+
+    def d_loss(self, runner, data):
+        """Computes loss for discriminator."""
+        G = runner.models['generator']
+        D = runner.models['discriminator']
+
+        reals = self.preprocess_image(data['image'], lod=runner.lod)
+        reals.requires_grad = True
+        labels = data.get('label', None)
+
+        latents = torch.randn(reals.shape[0], runner.z_space_dim).cuda()
+        latents.requires_grad = True
+        # TODO: Use random labels.
+        fakes = G(latents, label=labels, **runner.G_kwargs_train)['image']
+        real_scores = D(reals, label=labels, **runner.D_kwargs_train)
+        fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
+
+        d_loss = F.softplus(fake_scores).mean()
+        d_loss += F.softplus(-real_scores).mean()
+        runner.running_stats.update({'d_loss': d_loss.item()})
+
+        real_grad_penalty = torch.zeros_like(d_loss)
+        fake_grad_penalty = torch.zeros_like(d_loss)
+        if self.r1_gamma:
+            real_grad_penalty = self.compute_grad_penalty(reals, real_scores)
+            runner.running_stats.update(
+                {'real_grad_penalty': real_grad_penalty.item()})
+        if self.r2_gamma:
+            fake_grad_penalty = self.compute_grad_penalty(fakes, fake_scores)
+            runner.running_stats.update(
+                {'fake_grad_penalty': fake_grad_penalty.item()})
+
+        return (d_loss +
+                real_grad_penalty * (self.r1_gamma * 0.5) +
+                fake_grad_penalty * (self.r2_gamma * 0.5))
+
+    def g_loss(self, runner, data):  # pylint: disable=no-self-use
+        """Computes loss for generator."""
+        # TODO: Use random labels.
+        G = runner.models['generator']
+        D = runner.models['discriminator']
+        S = runner.models['segmentator']
+        S.eval()
+        
+        batch_size = data['image'].shape[0]
+        labels = data.get('label', None)
+
+        latents = torch.randn(batch_size, runner.z_space_dim).cuda()
+        fakes = G(latents, label=labels, **runner.G_kwargs_train)['image']
+        pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
+
+        print(pred.shape, fakes.shape)
+        exit(0)
+        fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
+
+        g_loss = F.softplus(-fake_scores).mean()
+        runner.running_stats.update({'g_loss': g_loss.item()})
+
+        return g_loss
+

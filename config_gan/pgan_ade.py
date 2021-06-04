@@ -9,7 +9,10 @@ runner_type = 'StyleGANRunner'
 gan_type = 'stylegan'
 resolution = 256
 
-batch_size = 12
+base_bsz = 32
+num_gpu = 8
+
+batch_size = base_bsz / num_gpu
 val_batch_size = 32
 total_img = 4000_000
 

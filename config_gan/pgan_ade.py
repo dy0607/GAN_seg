@@ -12,10 +12,10 @@ resolution = 256
 base_bsz = 32
 num_gpu = 4
 
-bsz = batch_size = base_bsz / num_gpu
+bsz = batch_size = base_bsz // num_gpu
 val_batch_size = batch_size * 2
 
-total_img = 8000_000
+total_img = 12_000_000
 
 # Training dataset is repeated at the beginning to avoid loading dataset
 # repeatedly at the end of each epoch. This can save some I/O time.
@@ -62,5 +62,5 @@ modules = dict(
 loss = dict(
     type='LogisticGANLoss',
     d_loss_kwargs=dict(r1_gamma=10.0),
-    g_loss_kwargs=dict(beta=0.1),
+    g_loss_kwargs=dict(),
 )

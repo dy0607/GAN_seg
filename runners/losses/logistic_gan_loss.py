@@ -60,7 +60,7 @@ class LogisticGANLoss(object):
         penalty = image_grad.pow(2).sum(dim=1).mean()
         return penalty
 
-    def d_loss(self, runner, data):
+    def d_loss(self, runner, data, res):
         """Computes loss for discriminator."""
         G = runner.models['generator']
         D = runner.models['discriminator']
@@ -95,7 +95,7 @@ class LogisticGANLoss(object):
                 real_grad_penalty * (self.r1_gamma * 0.5) +
                 fake_grad_penalty * (self.r2_gamma * 0.5))
 
-    def g_loss(self, runner, data):  # pylint: disable=no-self-use
+    def g_loss(self, runner, data, res):  # pylint: disable=no-self-use
         """Computes loss for generator."""
         # TODO: Use random labels.
         G = runner.models['generator']

@@ -4,3 +4,5 @@ examples
 *__pycache__
 *.zip
 results/
+.vscode
+*.png

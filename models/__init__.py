@@ -22,7 +22,7 @@ __all__ = [
 ]
 
 _GAN_TYPES_ALLOWED = ['pggan', 'stylegan', 'stylegan2']
-_MODULES_ALLOWED = ['generator', 'discriminator', 'segmentator']
+_MODULES_ALLOWED = ['generator', 'discriminator', 'segmentator', 'segmentation_discriminator']
 
 
 def build_generator(gan_type, resolution, **kwargs):
@@ -101,6 +101,16 @@ def build_segmentator(resolution, config_path, **kwargs):
     segmentation_module = SegmentationModule(net_encoder, net_decoder, None, fixed=True)
     return segmentation_module
 
+def build_segmentation_discriminator(gan_type, resolution, **kwargs):
+    
+    if gan_type == 'pggan':
+        return PGGANDiscriminator(resolution, **kwargs)
+    if gan_type == 'stylegan':
+        return StyleGANDiscriminator(resolution, **kwargs)
+    if gan_type == 'stylegan2':
+        return StyleGAN2Discriminator(resolution, **kwargs)
+    raise NotImplementedError(f'Unsupported GAN type `{gan_type}`!')
+
 def build_model(gan_type, module, resolution, **kwargs):
     """Builds a GAN module (generator/discriminator/etc).
 
@@ -124,6 +134,8 @@ def build_model(gan_type, module, resolution, **kwargs):
         return build_discriminator(gan_type, resolution, **kwargs)
     if module == 'segmentator':
         return build_segmentator(resolution, **kwargs)
+    if module == 'segmentation_discriminator':
+        return build_segmentation_discriminator(gan_type, resolution, **kwargs)
 
     raise NotImplementedError(f'Unsupported module `{module}`!')
 

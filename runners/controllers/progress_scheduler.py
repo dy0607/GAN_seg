@@ -154,6 +154,8 @@ class ProgressScheduler(BaseController):
             for lr_name, base_lrs in self.base_lrs.items():
                 runner.lr_schedulers[lr_name].base_lrs = [
                     lr * lr_scale for lr in base_lrs]
+        
+        return resolution
 
     def execute_after_iteration(self, runner):
         minibatch = runner.batch_size * runner.world_size

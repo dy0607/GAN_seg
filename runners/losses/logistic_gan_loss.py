@@ -5,6 +5,8 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
+from torchvision.utils import save_image
+
 __all__ = ['LogisticGANLoss', 'SegGANLoss']
 
 apply_loss_scaling = lambda x: x * torch.exp(x * np.log(2.0))
@@ -116,10 +118,11 @@ class SegGANLoss(LogisticGANLoss):
     def __init__(self, runner, d_loss_kwargs=None, g_loss_kwargs=None):
         super().__init__(runner, d_loss_kwargs=d_loss_kwargs, g_loss_kwargs=g_loss_kwargs)
 
-    def d_loss(self, runner, data):
+    def d_loss(self, runner, data, res):
         """Computes loss for discriminator."""
         G = runner.models['generator']
         D = runner.models['discriminator']
+        S = runner.models['segmentator']
 
         reals = self.preprocess_image(data['image'], lod=runner.lod)
         reals.requires_grad = True
@@ -129,11 +132,31 @@ class SegGANLoss(LogisticGANLoss):
         latents.requires_grad = True
         # TODO: Use random labels.
         fakes = G(latents, label=labels, **runner.G_kwargs_train)['image']
-        real_scores = D(reals, label=labels, **runner.D_kwargs_train)
-        fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
+
+        if res == 256:
+            real_pred = S(reals, segSize=(reals.shape[-2], reals.shape[-1]))
+            fake_pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
+            real_pred = real_pred.permute(0, 2, 3, 1).max(axis=-1)[1]
+            fake_pred = fake_pred.permute(0, 2, 3, 1).max(axis=-1)[1]
+        else:
+            shape = fakes[:,0,:,:].shape
+            real_pred = torch.zeros(shape).to(reals.device)
+            fake_pred = torch.zeros(shape).to(fakes.device)
+
+        save_image(fake_pred[3] / 150.0, 'fake.png')
+        save_image(real_pred[3] / 150.0, 'real.png')
+        save_image(fakes[3] / 1.0, 'fake_image.png')
+        save_image(reals[3] / 1.0, 'real_image.png')
+        quit()
+
+        real_input = torch.cat((reals, real_pred.unsqueeze(1) * 1.0), dim=1)
+        fake_input = torch.cat((fakes, fake_pred.unsqueeze(1) * 1.0), dim=1)
+        real_scores = D(real_input, label=labels, **runner.D_kwargs_train)
+        fake_scores = D(fake_input, label=labels, **runner.D_kwargs_train)
 
         d_loss = F.softplus(fake_scores).mean()
         d_loss += F.softplus(-real_scores).mean()
+
         runner.running_stats.update({'d_loss': d_loss.item()})
 
         real_grad_penalty = torch.zeros_like(d_loss)
@@ -151,7 +174,7 @@ class SegGANLoss(LogisticGANLoss):
                 real_grad_penalty * (self.r1_gamma * 0.5) +
                 fake_grad_penalty * (self.r2_gamma * 0.5))
 
-    def g_loss(self, runner, data):  # pylint: disable=no-self-use
+    def g_loss(self, runner, data, res):  # pylint: disable=no-self-use
         """Computes loss for generator."""
         # TODO: Use random labels.
         G = runner.models['generator']
@@ -164,11 +187,15 @@ class SegGANLoss(LogisticGANLoss):
 
         latents = torch.randn(batch_size, runner.z_space_dim).cuda()
         fakes = G(latents, label=labels, **runner.G_kwargs_train)['image']
-        pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
-
-        print(pred.shape, fakes.shape)
-        exit(0)
-        fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
+        
+        if res == 256:
+            pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
+            pred = pred.permute(0, 2, 3, 1).max(axis=-1)[1]
+        else:
+            shape = fakes[:,0,:,:].shape
+            pred = torch.zeros(shape).to(fakes.device)
+        fake_input = torch.cat((fakes, pred.unsqueeze(1) * 1.0), dim=1)
+        fake_scores = D(fake_input, label=labels, **runner.D_kwargs_train)
 
         g_loss = F.softplus(-fake_scores).mean()
         runner.running_stats.update({'g_loss': g_loss.item()})

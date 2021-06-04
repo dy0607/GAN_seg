@@ -9,7 +9,7 @@ runner_type = 'StyleGANRunner'
 gan_type = 'stylegan'
 resolution = 256
 
-batch_size = 8
+batch_size = 4
 val_batch_size = 32
 total_img = 4000_000
 
@@ -38,7 +38,7 @@ controllers = dict(
 
 modules = dict(
     discriminator=dict(
-        model=dict(gan_type=gan_type, resolution=resolution),
+        model=dict(gan_type=gan_type, resolution=resolution, image_channels=4),
         lr=dict(lr_type='FIXED'),
         opt=dict(opt_type='Adam', base_lr=1e-3, betas=(0.0, 0.99)),
         kwargs_train=dict(),
@@ -59,6 +59,12 @@ modules = dict(
             resolution=resolution, 
             config_path='config_seg/ade20k-hrnetv2.yaml')
     ),
+    # segmentation_discriminator=dict(
+    #     model=dict(
+    #         gan_type=gan_type,
+    #         resolution=resolution,
+    #         image_channels=1)
+    # )
 )
 
 loss = dict(

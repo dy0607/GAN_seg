@@ -233,7 +233,7 @@ class BaseController(object):
             runner: The runner to control.
         """
         if self.is_executable(runner):
-            self.execute_before_iteration(runner)
+            return self.execute_before_iteration(runner)
 
     def post_execute(self, runner):
         """Post-executes the controller after the running of each iteration.

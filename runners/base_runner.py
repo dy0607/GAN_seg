@@ -176,11 +176,12 @@ class BaseRunner(object):
     def distribute(self):
         """Sets `self.model` as `torch.nn.parallel.DistributedDataParallel`."""
         for name in self.models:
-            self.models[name] = torch.nn.parallel.DistributedDataParallel(
-                module=self.models[name],
-                device_ids=[torch.cuda.current_device()],
-                broadcast_buffers=False,
-                find_unused_parameters=True)
+            if name is not 'segmentator':
+                self.models[name] = torch.nn.parallel.DistributedDataParallel(
+                    module=self.models[name],
+                    device_ids=[torch.cuda.current_device()],
+                    broadcast_buffers=False,
+                    find_unused_parameters=True)
 
     @staticmethod
     def get_module(model):

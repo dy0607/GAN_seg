@@ -10,7 +10,8 @@ import torch.nn as nn
 from scipy.io import loadmat
 # Our libs
 from mit_semseg.config import cfg
-from mit_semseg.dataset import ValDataset
+from datasets import BaseDataset
+from datasets import IterDataLoader
 from mit_semseg.models import ModelBuilder, SegmentationModule
 from mit_semseg.utils import AverageMeter, colorEncode, accuracy, intersectionAndUnion, setup_logger
 from mit_semseg.lib.nn import user_scattered_collate, async_copy_to
@@ -42,67 +43,28 @@ def evaluate(segmentation_module, loader, cfg, gpu):
     segmentation_module.eval()
 
     pbar = tqdm(total=len(loader))
+    freq = torch.zeros((150)).cuda()
+    total = 0
+
     for batch_data in loader:
         # process data
 
-        batch_data = batch_data[0]
-        seg_label = as_numpy(batch_data['seg_label'][0])
-        img_resized_list = batch_data['img_data']
+        batch_data = batch_data['image'].cuda()
+        total += batch_data.shape[0] * 256 * 256
 
-        print(seg_label.shape, [img_resized_list[i].shape for i in range(5)], batch_data['img_ori'].shape)
-
-        torch.cuda.synchronize()
         tic = time.perf_counter()
         with torch.no_grad():
-            segSize = (seg_label.shape[0], seg_label.shape[1])
-            scores = torch.zeros(1, cfg.DATASET.num_class, segSize[0], segSize[1])
-            scores = async_copy_to(scores, gpu)
+            segSize = (256, 256)
+            
+            pred = segmentation_module(batch_data, segSize=segSize)
+            freq += pred.sum(dim=(0, 2, 3))
 
-            for img in img_resized_list:
-                feed_dict = batch_data.copy()
-                feed_dict['img_data'] = img
-                del feed_dict['img_ori']
-                del feed_dict['info']
-                feed_dict = async_copy_to(feed_dict, gpu)
-
-                # forward pass
-                scores_tmp = segmentation_module(feed_dict, segSize=segSize)
-                print(scores_tmp.shape, img.shape)
-                exit(0)
-                scores = scores + scores_tmp / len(cfg.DATASET.imgSizes)
-
-            _, pred = torch.max(scores, dim=1)
-            pred = as_numpy(pred.squeeze(0).cpu())
-
-        torch.cuda.synchronize()
         time_meter.update(time.perf_counter() - tic)
-
-        # calculate accuracy
-        acc, pix = accuracy(pred, seg_label)
-        intersection, union = intersectionAndUnion(pred, seg_label, cfg.DATASET.num_class)
-        acc_meter.update(acc, pix)
-        intersection_meter.update(intersection)
-        union_meter.update(union)
-
-        # visualization
-        if cfg.VAL.visualize:
-            visualize_result(
-                (batch_data['img_ori'], seg_label, batch_data['info']),
-                pred,
-                os.path.join(cfg.DIR, 'result')
-            )
 
         pbar.update(1)
 
-    # summary
-    iou = intersection_meter.sum / (union_meter.sum + 1e-10)
-    for i, _iou in enumerate(iou):
-        print('class [{}], IoU: {:.4f}'.format(i, _iou))
-
-    print('[Eval Summary]:')
-    print('Mean IoU: {:.4f}, Accuracy: {:.2f}%, Inference Time: {:.4f}s'
-          .format(iou.mean(), acc_meter.average()*100, time_meter.average()))
-
+    freq = (freq / total).cpu()
+    torch.save(freq, "data/ADEChallengeData2016/seg_freq.pt")
 
 def main(cfg, gpu):
     torch.cuda.set_device(gpu)
@@ -121,25 +83,32 @@ def main(cfg, gpu):
 
     crit = nn.NLLLoss(ignore_index=-1)
 
-    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit)
+    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit, fixed=True)
 
     # Dataset and Loader
-    dataset_val = ValDataset(
-        cfg.DATASET.root_dataset,
-        cfg.DATASET.list_val,
-        cfg.DATASET)
-    loader_val = torch.utils.data.DataLoader(
-        dataset_val,
-        batch_size=cfg.VAL.batch_size,
-        shuffle=False,
-        collate_fn=user_scattered_collate,
-        num_workers=5,
-        drop_last=True)
+    
+    resolution = 256
+    data = dict(
+        num_workers=4,
+        repeat=1,
+        train=dict(root_dir='data/ADEChallengeData2016/images/training', data_format='dir',
+                    resolution=resolution, mirror=0.5),
+        val=dict(root_dir='data/ADEChallengeData2016/images/validation', data_format='dir',
+                    resolution=resolution),
+    )
+
+    mode = 'train'
+    dataset = BaseDataset(**data[mode])
+    train_loader = torch.utils.data.DataLoader(
+            dataset=dataset,
+            batch_size=16,
+            shuffle=False,
+            num_workers=data.get('num_workers', 2))
 
     segmentation_module.cuda()
 
     # Main loop
-    evaluate(segmentation_module, loader_val, cfg, gpu)
+    evaluate(segmentation_module, train_loader, cfg, gpu)
 
     print('Evaluation Done!')
 

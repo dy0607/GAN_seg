@@ -214,8 +214,14 @@ class BaseRunner(object):
 
     def pre_execute_controllers(self):
         """Pre-executes all controllers in order of priority."""
+        res = 0
+
         for controller in self.controllers:
-            controller.pre_execute(self)
+            ret = controller.pre_execute(self)
+            if ret is not None:
+                res = ret
+        
+        return res
 
     def post_execute_controllers(self):
         """Post-executes all controllers in order of priority."""
@@ -278,14 +284,14 @@ class BaseRunner(object):
         assert self.total_iters > 0
         while self.iter < self.total_iters:
             self._iter += 1
-            self.pre_execute_controllers()
+            res = self.pre_execute_controllers()
             data_batch = next(self.train_loader)
             self.timer.pre_execute(self)
             for key in data_batch:
                 assert data_batch[key].shape[0] == self.batch_size
                 data_batch[key] = data_batch[key].cuda(
                     torch.cuda.current_device(), non_blocking=True)
-            self.train_step(data_batch, **train_kwargs)
+            self.train_step(data_batch, res, **train_kwargs)
             self.seen_img += self.batch_size * self.world_size
             self.timer.post_execute(self)
             self.post_execute_controllers()

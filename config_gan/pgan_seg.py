@@ -19,7 +19,7 @@ total_img = 8000_000
 # Training dataset is repeated at the beginning to avoid loading dataset
 # repeatedly at the end of each epoch. This can save some I/O time.
 data = dict(
-    num_workers=0,
+    num_workers=2,
     repeat=500,
     train=dict(root_dir='data/ADEChallengeData2016/images/training', data_format='dir',
                resolution=resolution, mirror=0.5),
@@ -30,9 +30,9 @@ data = dict(
 controllers = dict(
     RunningLogger=dict(every_n_iters=10),
     ProgressScheduler=dict(
-        every_n_iters=1, init_res=256, minibatch_repeats=4,
+        every_n_iters=1, init_res=8, minibatch_repeats=4,
         lod_training_img=300_000, lod_transition_img=300_000,
-        batch_size_schedule=dict(res4=bsz*8, res8=bsz*4, res16=bsz*4, res32=bsz*4, res64=bsz*2, res128=bsz*2),
+        batch_size_schedule=dict(res4=bsz*8, res8=bsz*2, res16=bsz*2, res32=bsz*2, res64=bsz*2, res128=bsz),
     ),
     Snapshoter=dict(every_n_iters=2500, first_iter=True, num=100),
     FIDEvaluator=dict(every_n_iters=5000, first_iter=True, num=50000),
@@ -62,6 +62,12 @@ modules = dict(
             resolution=resolution, 
             config_path='config_seg/ade20k-hrnetv2.yaml')
     ),
+    # segmentation_discriminator=dict(
+    #     model=dict(
+    #         gan_type=gan_type,
+    #         resolution=resolution,
+    #         image_channels=1)
+    # )
 )
 
 loss = dict(

@@ -26,7 +26,7 @@ class StyleGANRunner(BaseGANRunner):
         self.running_stats.add(
             f'Gs_beta', log_format='.4f', log_strategy='CURRENT')
 
-    def train_step(self, data, res, **train_kwargs):
+    def train_step(self, data, **train_kwargs):
         # Set level-of-details.
         G = self.get_module(self.models['generator'])
         D = self.get_module(self.models['discriminator'])
@@ -39,7 +39,7 @@ class StyleGANRunner(BaseGANRunner):
         self.set_model_requires_grad('discriminator', True)
         self.set_model_requires_grad('generator', False)
 
-        d_loss = self.loss.d_loss(self, data, res)
+        d_loss = self.loss.d_loss(self, data)
         self.optimizers['discriminator'].zero_grad()
         d_loss.backward()
         self.optimizers['discriminator'].step()
@@ -55,7 +55,7 @@ class StyleGANRunner(BaseGANRunner):
         if self._iter % self.config.get('D_repeats', 1) == 0:
             self.set_model_requires_grad('discriminator', False)
             self.set_model_requires_grad('generator', True)
-            g_loss = self.loss.g_loss(self, data, res)
+            g_loss = self.loss.g_loss(self, data)
             self.optimizers['generator'].zero_grad()
             g_loss.backward()
             self.optimizers['generator'].step()

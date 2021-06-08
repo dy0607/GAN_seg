@@ -8,18 +8,18 @@ and `num_workers`.
 runner_type = 'StyleGANRunner'
 gan_type = 'stylegan'
 resolution = 256
-batch_size = 64
+batch_size = 32
 
 data = dict(
-    num_workers=4,
+    num_workers=2,
     # val=dict(root_dir='data/ffhq', resolution=resolution),
-    val=dict(root_dir='data/ffhq.zip', data_format='zip',
+    val=dict(root_dir='data/ADEChallengeData2016/images/training', data_format='dir',
              resolution=resolution),
 )
 
 modules = dict(
     discriminator=dict(
-        model=dict(gan_type=gan_type, resolution=resolution),
+        model=dict(gan_type=gan_type, resolution=resolution, image_channels=3),
         kwargs_val=dict(),
     ),
     generator=dict(
@@ -27,4 +27,3 @@ modules = dict(
         kwargs_val=dict(trunc_psi=0.7, trunc_layers=8, randomize_noise=False),
     )
 )
-

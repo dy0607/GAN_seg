@@ -120,7 +120,7 @@ class SegGANLoss(LogisticGANLoss):
         self.true_freq = torch.load(freq_path).cuda()
         # print(self.true_freq)
 
-    def d_loss(self, runner, data, res):
+    def d_loss(self, runner, data, res, extra=False):
         """Computes loss for discriminator."""
         G = runner.models['generator']
         D = runner.models['discriminator']
@@ -135,26 +135,24 @@ class SegGANLoss(LogisticGANLoss):
         # TODO: Use random labels.
         fakes = G(latents, label=labels, **runner.G_kwargs_train)['image']
 
-        """
-        if res == 256:
-            real_pred = S(reals, segSize=(reals.shape[-2], reals.shape[-1]))
-            fake_pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
-            real_pred = real_pred.permute(0, 2, 3, 1).max(axis=-1)[1]
-            fake_pred = fake_pred.permute(0, 2, 3, 1).max(axis=-1)[1]
+        if extra:
+            if res == 256:
+                real_pred = S(reals, segSize=(reals.shape[-2], reals.shape[-1]))
+                fake_pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
+                real_pred = real_pred.max(dim=1)[1]
+                fake_pred = fake_pred.max(dim=1)[1]
+            else:
+                shape = fakes[:,0,:,:].shape
+                real_pred = torch.zeros(shape).to(reals.device)
+                fake_pred = torch.zeros(shape).to(fakes.device)
+            
+            real_input = torch.cat((reals, real_pred.unsqueeze(1) * 1.0), dim=1)
+            fake_input = torch.cat((fakes, fake_pred.unsqueeze(1) * 1.0), dim=1)
+            real_scores = D(real_input, label=labels, **runner.D_kwargs_train)
+            fake_scores = D(fake_input, label=labels, **runner.D_kwargs_train)
         else:
-            shape = fakes[:,0,:,:].shape
-            real_pred = torch.zeros(shape).to(reals.device)
-            fake_pred = torch.zeros(shape).to(fakes.device)
-
-        real_input = torch.cat((reals, real_pred.unsqueeze(1) * 1.0), dim=1)
-        fake_input = torch.cat((fakes, fake_pred.unsqueeze(1) * 1.0), dim=1)
-
-        real_scores = D(real_input, label=labels, **runner.D_kwargs_train)
-        fake_scores = D(fake_input, label=labels, **runner.D_kwargs_train)
-        """
-        
-        real_scores = D(reals, label=labels, **runner.D_kwargs_train)
-        fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
+            real_scores = D(reals, label=labels, **runner.D_kwargs_train)
+            fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
 
         d_loss = F.softplus(fake_scores).mean()
         d_loss += F.softplus(-real_scores).mean()
@@ -176,7 +174,7 @@ class SegGANLoss(LogisticGANLoss):
                 real_grad_penalty * (self.r1_gamma * 0.5) +
                 fake_grad_penalty * (self.r2_gamma * 0.5))
 
-    def g_loss(self, runner, data, res, beta=0.1):  # pylint: disable=no-self-use
+    def g_loss(self, runner, data, res, beta=0.1, extra=False):  # pylint: disable=no-self-use
         """Computes loss for generator."""
         # TODO: Use random labels.
         G = runner.models['generator']
@@ -190,26 +188,28 @@ class SegGANLoss(LogisticGANLoss):
         latents = torch.randn(batch_size, runner.z_space_dim).cuda()
         fakes = G(latents, label=labels, **runner.G_kwargs_train)['image']
         
-        pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
-        pred = pred.mean(dim=(0, 2, 3))
-
-        fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
         
-        """
         if res == 256:
             pred = S(fakes, segSize=(fakes.shape[-2], fakes.shape[-1]))
-            pred = pred.permute(0, 2, 3, 1).max(axis=-1)[1]
+            pred_freq = pred.mean(dim=(0, 2, 3))
+            pred = pred.max(dim=1)[1]
         else:
             shape = fakes[:,0,:,:].shape
             pred = torch.zeros(shape).to(fakes.device)
-        fake_input = torch.cat((fakes, pred.unsqueeze(1) * 1.0), dim=1)
-        fake_scores = D(fake_input, label=labels, **runner.D_kwargs_train)
-        """
-
-        g_loss_seg = F.kl_div(pred, self.true_freq) if res == 256 else torch.zeros([]).cuda()
-        g_loss = F.softplus(-fake_scores).mean()
         
-        # print(pred.sum(), self.true_freq.sum(), g_loss, g_loss_seg)
+        if extra: 
+            fake_input = torch.cat((fakes, pred.unsqueeze(1) * 1.0), dim=1)
+            fake_scores = D(fake_input, label=labels, **runner.D_kwargs_train)
+        else:
+            fake_scores = D(fakes, label=labels, **runner.D_kwargs_train)
+        
+        if res == 256 and beta is not 0:
+            g_loss_seg = F.kl_div(pred_freq, self.true_freq) 
+        else:
+            g_loss_seg = torch.zeros([]).cuda()
+
+        g_loss = F.softplus(-fake_scores).mean()
+        # print(pred_freq.sum(), self.true_freq.sum(), g_loss, g_loss_seg)
 
         runner.running_stats.update({'g_loss_0': g_loss.item()})
         runner.running_stats.update({'g_loss_seg': g_loss_seg.item()})

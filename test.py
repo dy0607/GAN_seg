@@ -30,12 +30,17 @@ def parse_args():
     parser.add_argument('--fid_num', type=int, default=50000,
                         help='Number of samples to compute FID. Set as 0 to '
                              'disable FID test. (default: %(default)s)')
+    parser.add_argument('--sid_num', type=int, default=50000,
+                        help='Number of samples to compute SID. Set as 0 to '
+                             'disable SID test. (default: %(default)s)')
     parser.add_argument('--use_torchvision', action='store_true',
                         help='Wether to use the Inception model from '
                              '`torchvision` to compute FID. (default: False)')
     parser.add_argument('--launcher', type=str, default='pytorch',
                         choices=['pytorch', 'slurm'],
                         help='Launcher type. (default: %(default)s)')
+    parser.add_argument('--config_path', type=str, default='pytorch',
+                        help='Config path for the segmentator. (default: %(default)s)')
     parser.add_argument('--backend', type=str, default='nccl',
                         help='Backend for distributed launcher. (default: '
                              '%(default)s)')
@@ -93,6 +98,14 @@ def main():
                 learning_rate=False,
                 optimizer=False,
                 running_stats=False)
+    
+    if args.sid_num > 0:
+        num = args.fid_num
+        logger.print()
+        logger.info(f'Testing SID ...')
+        sid_value = runner.sid(num, args.config_path)
+        logger.info(f'Finish testing SID on {num} samples. '
+                    f'The result is {sid_value:.6f}.')
 
     if args.synthesis_num > 0:
         num = args.synthesis_num
@@ -108,7 +121,6 @@ def main():
         fid_value = runner.fid(num, align_tf=not args.use_torchvision)
         logger.info(f'Finish testing FID on {num} samples. '
                     f'The result is {fid_value:.6f}.')
-
 
 if __name__ == '__main__':
     main()

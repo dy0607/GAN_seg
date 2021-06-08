@@ -41,7 +41,7 @@ controllers = dict(
 
 modules = dict(
     discriminator=dict(
-        model=dict(gan_type=gan_type, resolution=resolution),
+        model=dict(gan_type=gan_type, resolution=resolution, image_channels=4),
         lr=dict(lr_type='FIXED'),
         opt=dict(opt_type='Adam', base_lr=1e-3, betas=(0.0, 0.99)),
         kwargs_train=dict(),
@@ -73,6 +73,6 @@ modules = dict(
 loss = dict(
     type='SegGANLoss',
     freq_path='data/ADEChallengeData2016/seg_freq.pt',
-    d_loss_kwargs=dict(r1_gamma=10.0),
-    g_loss_kwargs=dict(beta=10),
+    d_loss_kwargs=dict(r1_gamma=10.0, extra=True),
+    g_loss_kwargs=dict(beta=0, extra=True),
 )

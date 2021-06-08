@@ -16,6 +16,9 @@ from utils.visualizer import save_image
 from utils.visualizer import load_image
 from .base_runner import BaseRunner
 
+import matplotlib.pyplot as plt
+import models
+
 __all__ = ['BaseGANRunner']
 
 
@@ -272,3 +275,122 @@ class BaseGANRunner(BaseRunner):
 
         fid_value = compute_fid(fake_features, real_features)
         return fid_value
+
+    def sid(self, sid_num, config_path, ignore_cache=True):
+        """Computes the SID metric."""
+        self.set_mode('val')
+
+        if self.val_loader is None:
+            self.build_dataset('val')
+        self.sid_num = sid_num = min(sid_num, len(self.val_loader.dataset))
+
+        self.segmentation_model = models.build_segmentator(256, config_path).cuda()
+        self.logger.info(f'Finish building segmentation model.')
+
+        indices = list(range(self.rank, self.sid_num, self.world_size))
+        self.logger.init_pbar()
+
+        # Extract features from fake images.
+        fake_feature_list = []
+        task1 = self.logger.add_pbar_task('Fake', total=self.sid_num)
+        for batch_idx in range(0, len(indices), self.val_batch_size):
+            sub_indices = indices[batch_idx:batch_idx + self.val_batch_size]
+            batch_size = len(sub_indices)
+            
+            code = torch.randn(batch_size, self.z_space_dim).cuda()
+            
+            with torch.no_grad():
+                if 'generator_smooth' in self.models:
+                    G = self.models['generator_smooth']
+                else:
+                    G = self.models['generator']
+                fake_images = G(code)['image']
+                fake_feature_list.append(
+                    extract_feature(self.segmentation_model, fake_images, seg=True))
+            self.logger.update_pbar(task1, batch_size * self.world_size)
+
+        np.save(f'{self.work_dir}/fake_sid_features_{self.rank}.npy',
+                np.concatenate(fake_feature_list, axis=0))
+
+        # Extract features from real images if needed.
+        cached_sid_file = f'{self.work_dir}/real_sid{sid_num}.npy'
+        do_real_test = (not os.path.exists(cached_sid_file) or ignore_cache)
+        if do_real_test:
+            real_feature_list = []
+            task2 = self.logger.add_pbar_task("Real", total=sid_num)
+            for batch_idx in range(0, len(indices), self.val_batch_size):
+                sub_indices = indices[batch_idx:batch_idx + self.val_batch_size]
+                batch_size = len(sub_indices)
+                data = next(self.val_loader)
+                for key in data:
+                    data[key] = data[key][:batch_size].cuda(
+                        torch.cuda.current_device(), non_blocking=True)
+                with torch.no_grad():
+                    real_images = data['image']
+                    real_feature_list.append(
+                        extract_feature(self.segmentation_model, real_images, seg=True))
+                self.logger.update_pbar(task2, batch_size * self.world_size)
+            np.save(f'{self.work_dir}/real_sid_features_{self.rank}.npy',
+                    np.concatenate(real_feature_list, axis=0))
+
+        dist.barrier()
+        if self.rank != 0:
+            return -1
+        self.logger.close_pbar()
+
+        # Collect fake features.
+        fake_feature_list.clear()
+        for rank in range(self.world_size):
+            fake_feature_list.append(
+                np.load(f'{self.work_dir}/fake_sid_features_{rank}.npy'))
+            os.remove(f'{self.work_dir}/fake_sid_features_{rank}.npy')
+        fake_features = np.concatenate(fake_feature_list, axis=0)
+        assert fake_features.ndim == 2 and fake_features.shape[0] == sid_num
+        feature_dim = fake_features.shape[1]
+        pad = sid_num % self.world_size
+        if pad:
+            pad = self.world_size - pad
+        fake_features = np.pad(fake_features, ((0, pad), (0, 0)))
+        fake_features = fake_features.reshape(self.world_size, -1, feature_dim)
+        fake_features = fake_features.transpose(1, 0, 2)
+        fake_features = fake_features.reshape(-1, feature_dim)[:sid_num]
+
+        # Collect (or load) real features.
+        if do_real_test:
+            real_feature_list.clear()
+            for rank in range(self.world_size):
+                real_feature_list.append(
+                    np.load(f'{self.work_dir}/real_sid_features_{rank}.npy'))
+                os.remove(f'{self.work_dir}/real_sid_features_{rank}.npy')
+            real_features = np.concatenate(real_feature_list, axis=0)
+            assert real_features.shape == (sid_num, feature_dim)
+            real_features = np.pad(real_features, ((0, pad), (0, 0)))
+            real_features = real_features.reshape(
+                self.world_size, -1, feature_dim)
+            real_features = real_features.transpose(1, 0, 2)
+            real_features = real_features.reshape(-1, feature_dim)[:sid_num]
+            np.save(cached_sid_file, real_features)
+        else:
+            real_features = np.load(cached_sid_file)
+            assert real_features.shape == (sid_num, feature_dim)
+
+        num_class = 20
+
+        fm = fake_features.mean(axis=0)[: num_class]
+        rm = real_features.mean(axis=0)[: num_class]
+
+        plt.bar(range(num_class), fm / rm)
+        plt.xlabel("semantic classes")
+        plt.ylabel("generated area / real area")
+        plt.savefig(f'{self.work_dir}/seg_ratio_{rank}.png')
+
+        plt.cla()
+        plt.bar(range(num_class), np.log(fm), label='generated images')
+        plt.bar(range(num_class), -np.log(rm), label='real images')
+        plt.xlabel("semantic classes")
+        plt.ylabel("log mean area")
+        plt.legend()
+        plt.savefig(f'{self.work_dir}/distributions_{rank}.png')
+
+        sid_value = compute_fid(fake_features * 100, real_features * 100)
+        return sid_value

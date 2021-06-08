@@ -18,7 +18,7 @@ from mit_semseg.lib.nn import UserScatteredDataParallel, user_scattered_collate,
 __all__ = [
     'MODEL_ZOO', 'PGGANGenerator', 'PGGANDiscriminator', 'StyleGANGenerator',
     'StyleGANDiscriminator', 'StyleGAN2Generator', 'StyleGAN2Discriminator',
-    'build_generator', 'build_discriminator', 'build_model', 'parse_gan_type'
+    'build_generator', 'build_discriminator', 'build_segmentator', 'build_model', 'parse_gan_type'
 ]
 
 _GAN_TYPES_ALLOWED = ['pggan', 'stylegan', 'stylegan2']

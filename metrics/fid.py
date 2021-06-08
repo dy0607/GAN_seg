@@ -9,13 +9,14 @@ Equilibrium. Heusel et al. NeurIPS 2017.
 See details at https://arxiv.org/pdf/1706.08500.pdf
 """
 
+import torch.nn.functional as F
 import numpy as np
 import scipy.linalg
 
 __all__ = ['extract_feature', 'compute_fid']
 
 
-def extract_feature(inception_model, images):
+def extract_feature(inception_model, images, seg=False):
     """Extracts feature from input images with given model.
 
     NOTE: The input images are assumed to be with pixel range [-1, 1].
@@ -27,9 +28,16 @@ def extract_feature(inception_model, images):
     Returns:
         A `numpy.ndarray`, containing the extracted features.
     """
-    features = inception_model(images, output_logits=False)
-    features = features.detach().cpu().numpy()
-    assert features.ndim == 2 and features.shape[1] == 2048
+    if seg:
+        pred = inception_model(images, segSize=(256, 256)).max(dim=1)[1].detach().cpu()
+        bsz = pred.shape[0]
+        features = np.zeros((bsz, 150), dtype=np.float32)
+        for i in range(bsz):
+            features[i] = np.bincount(pred[i].view(-1).numpy(), minlength=150).astype(np.float32) / pred.shape[1] / pred.shape[2]
+    else:
+        features = inception_model(images, output_logits=False)
+        features = features.detach().cpu().numpy()
+    assert features.ndim == 2
     return features
 
 
@@ -53,6 +61,8 @@ def compute_fid(fake_features, real_features):
     C_f = np.cov(fake_features, rowvar=False)
     m_r = np.mean(real_features, axis=0)
     C_r = np.cov(real_features, rowvar=False)
+
+    print(m_f, m_r)
 
     fid = np.sum((m_f - m_r) ** 2) + np.trace(
         C_f + C_r - 2 * scipy.linalg.sqrtm(np.dot(C_f, C_r)))

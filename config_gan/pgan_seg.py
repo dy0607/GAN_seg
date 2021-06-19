@@ -73,6 +73,7 @@ modules = dict(
 loss = dict(
     type='SegGANLoss',
     freq_path='data/ADEChallengeData2016/seg_freq.pt',
+    warmup_step=10000,
     d_loss_kwargs=dict(r1_gamma=10.0),
-    g_loss_kwargs=dict(beta=10),
+    g_loss_kwargs=dict(beta=10, alpha=0.0001),
 )

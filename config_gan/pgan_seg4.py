@@ -14,14 +14,14 @@ num_gpu = 4
 
 bsz = batch_size = base_bsz // num_gpu
 val_batch_size = batch_size * 2
-total_img = 6000_000
+total_img = 8000_000
 
 # Training dataset is repeated at the beginning to avoid loading dataset
 # repeatedly at the end of each epoch. This can save some I/O time.
 data = dict(
     num_workers=2,
     repeat=500,
-    train=dict(root_dir='data/ADEChallengeData2016/images/training', data_format='dir',
+    train=dict(root_dir='data/church_outdoor_train_lmdb', data_format='lmdb',
                resolution=resolution, mirror=0.5),
     val=dict(root_dir='data/ADEChallengeData2016/images/validation', data_format='dir',
              resolution=resolution),
@@ -41,7 +41,7 @@ controllers = dict(
 
 modules = dict(
     discriminator=dict(
-        model=dict(gan_type=gan_type, resolution=resolution, image_channels=23),
+        model=dict(gan_type=gan_type, resolution=resolution, image_channels=4),
         lr=dict(lr_type='FIXED'),
         opt=dict(opt_type='Adam', base_lr=1e-3, betas=(0.0, 0.99)),
         kwargs_train=dict(),
@@ -73,6 +73,6 @@ modules = dict(
 loss = dict(
     type='SegGANLoss',
     freq_path='data/ADEChallengeData2016/seg_freq.pt',
-    d_loss_kwargs=dict(r1_gamma=10.0, extra=20),
-    g_loss_kwargs=dict(beta=0, extra=20),
+    d_loss_kwargs=dict(r1_gamma=10.0, extra=1),
+    g_loss_kwargs=dict(beta=0, extra=1),
 )

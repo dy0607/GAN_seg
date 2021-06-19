@@ -19,7 +19,7 @@ data = dict(
 
 modules = dict(
     discriminator=dict(
-        model=dict(gan_type=gan_type, resolution=resolution, image_channels=3),
+        model=dict(gan_type=gan_type, resolution=resolution, image_channels=4),
         kwargs_val=dict(),
     ),
     generator=dict(

@@ -1,8 +1,10 @@
 data/ADE*
+data/church*
 ckpt
 examples
 *__pycache__
 *.zip
 results/
-.vscode
+.vscode/
 *.png
+_cache*
